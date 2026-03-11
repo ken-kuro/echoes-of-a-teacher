@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mô phỏng 3D: Khoảng cách từ Cảm biến đến Mặt đáy</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #e0f7fa; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        .label3d {
+            position: absolute;
+            font-size: 0.75rem;
+            font-weight: bold;
+            color: #1f2937;
+            background: rgba(255, 255, 255, 0.85);
+            padding: 2px 6px;
+            border-radius: 4px;
+            pointer-events: none;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+            transition: opacity 0.1s;
+            white-space: nowrap;
+        }
+        .label3d.hidden-label { opacity: 0; pointer-events: none; }
+    </style>
+    <!-- Import Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <!-- UI Panel -->
+    <div class="absolute top-4 left-4 max-w-sm bg-white/95 backdrop-blur shadow-xl rounded-xl p-5 border border-gray-200 z-10 pointer-events-auto">
+        <h1 class="text-xl font-bold text-blue-900 mb-2 border-b pb-2">Đo Tiếng Vọng Đáy Biển</h1>
+        
+        <div class="text-sm text-gray-700 space-y-3 mb-4">
+            <p><strong>Bài toán:</strong> Tìm khoảng cách từ tàu ở điểm <span class="text-blue-600 font-semibold">A(50, 50, 0)</span> đến mặt phẳng đáy đi qua 3 điểm:</p>
+            <ul class="list-disc pl-5 space-y-1">
+                <li><span class="text-amber-700 font-semibold">P(0, 0, -20)</span></li>
+                <li><span class="text-amber-700 font-semibold">Q(50, 50, -15)</span></li>
+                <li><span class="text-amber-700 font-semibold">R(0, 50, -15)</span></li>
+            </ul>
+        </div>
+
+        <div class="bg-blue-50 p-3 rounded-lg border border-blue-100 space-y-2 text-sm">
+            <div class="flex justify-between items-center border-b border-blue-200 pb-1">
+                <span class="text-gray-600">Vị trí tàu (X, Y, Z):</span>
+                <span id="boat-pos" class="font-mono font-bold text-blue-800">(0.0, 0.0, 0.0)</span>
+            </div>
+            <div class="flex justify-between items-center border-b border-blue-200 pb-1">
+                <span class="text-gray-600">Độ sâu thẳng đứng:</span>
+                <span id="vert-depth" class="font-mono text-gray-800">20.00 m</span>
+            </div>
+            <div class="flex justify-between items-center">
+                <span class="text-gray-600 font-semibold">Khoảng cách đến đáy:</span>
+                <span id="short-dist" class="font-mono font-bold text-emerald-600 text-lg">19.90 m</span>
+            </div>
+        </div>
+
+        <div id="result-box" class="mt-4 p-3 rounded-lg border-2 border-dashed border-gray-300 bg-gray-50 transition-colors duration-500">
+            <p class="text-xs text-gray-500 mb-1">Phương trình mặt đáy:</p>
+            <p class="text-sm font-mono font-bold text-center bg-white border rounded py-1 mb-2">y - 10z - 200 = 0</p>
+            <div class="text-center">
+                <p class="text-xs text-gray-500">Tại A(50, 50, 0):</p>
+                <p class="text-lg font-bold text-blue-900">d ≈ 14.93 <span class="text-gray-400">→</span> <span class="text-green-600">15</span></p>
+            </div>
+        </div>
+        
+        <p class="text-xs text-gray-400 mt-3 text-center italic">Chuột trái để xoay, cuộn để zoom.</p>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // --- SETUP SCENE ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xdbeafe); // light blue sky
+        scene.fog = new THREE.Fog(0xdbeafe, 50, 200);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        container.appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        // Optimize starting angle to see the math axes clearly
+        camera.position.set(90, 40, 110);
+        controls.target.set(30, -10, 30);
+        controls.update();
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+        
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(20, 100, 50);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+
+        // --- MATH TO THREE.JS COORDINATE MAPPING ---
+        // Problem defines Z as up, X and Y as horizontal. 
+        // We map: Math X -> Three Z (depth), Math Y -> Three X (right), Math Z -> Three Y (up)
+        function m2t(mathX, mathY, mathZ) {
+            return new THREE.Vector3(mathY, mathZ, mathX);
+        }
+
+        // --- SCENE OBJECTS ---
+
+        // 1. Coordinate Axes
+        const origin = m2t(0, 0, 0);
+        const length = 25;
+        scene.add(new THREE.ArrowHelper(m2t(1, 0, 0).normalize(), origin, length, 0xff0000, 2, 1)); // Math X (Red)
+        scene.add(new THREE.ArrowHelper(m2t(0, 1, 0).normalize(), origin, length, 0x00aa00, 2, 1)); // Math Y (Green)
+        scene.add(new THREE.ArrowHelper(m2t(0, 0, 1).normalize(), origin, length, 0x0000ff, 2, 1)); // Math Z (Blue)
+
+        // 2. Water Surface
+        const waterSize = 100;
+        const waterGeom = new THREE.PlaneGeometry(waterSize, waterSize, 10, 10);
+        const wpos = waterGeom.attributes.position;
+        for(let i=0; i<wpos.count; i++) {
+            let u = wpos.getX(i); // -50 to 50
+            let v = wpos.getY(i); // -50 to 50
+            // Map plane X,Y to Math X,Y roughly centered around our action zone (0..50)
+            let mathX = u + 25; 
+            let mathY = v + 25;
+            let p = m2t(mathX, mathY, 0);
+            wpos.setXYZ(i, p.x, p.y, p.z);
+        }
+        waterGeom.computeVertexNormals();
+        const waterMat = new THREE.MeshPhysicalMaterial({
+            color: 0x0ea5e9, transparent: true, opacity: 0.35, 
+            side: THREE.DoubleSide, depthWrite: false
+        });
+        const water = new THREE.Mesh(waterGeom, waterMat);
+        scene.add(water);
+
+        // Grid on water for scale
+        const gridHelper = new THREE.GridHelper(100, 20, 0x000000, 0x000000);
+        gridHelper.material.opacity = 0.1;
+        gridHelper.material.transparent = true;
+        gridHelper.position.copy(m2t(25, 25, 0)); // Center it
+        scene.add(gridHelper);
+
+        // 3. Sloping Seabed
+        // Equation: z = y / 10 - 20
+        const sbGeom = new THREE.PlaneGeometry(waterSize, waterSize, 40, 40);
+        const sbpos = sbGeom.attributes.position;
+        for(let i=0; i<sbpos.count; i++) {
+            let mathX = sbpos.getX(i) + 25;
+            let mathY = sbpos.getY(i) + 25;
+            let mathZ = mathY / 10 - 20; // The core math formula
+            let p = m2t(mathX, mathY, mathZ);
+            sbpos.setXYZ(i, p.x, p.y, p.z);
+        }
+        sbGeom.computeVertexNormals();
+        
+        const sbMatSolid = new THREE.MeshStandardMaterial({
+            color: 0xc2b280, roughness: 0.9, 
+            polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1
+        });
+        const seabed = new THREE.Mesh(sbGeom, sbMatSolid);
+        seabed.receiveShadow = true;
+        
+        const sbMatWire = new THREE.LineBasicMaterial({color: 0x8b7355, transparent: true, opacity: 0.3});
+        const sbWire = new THREE.LineSegments(new THREE.WireframeGeometry(sbGeom), sbMatWire);
+        seabed.add(sbWire);
+        scene.add(seabed);
+
+        // 4. Points of Interest
+        const labels = [];
+        function createPoint(x, y, z, color, name) {
+            const mesh = new THREE.Mesh(
+                new THREE.SphereGeometry(1, 16, 16),
+                new THREE.MeshBasicMaterial({color: color})
+            );
+            mesh.position.copy(m2t(x, y, z));
+            scene.add(mesh);
+
+            // Create HTML Label
+            const div = document.createElement('div');
+            div.className = 'label3d';
+            div.innerText = name;
+            document.body.appendChild(div);
+            
+            labels.push({ el: div, pos: mesh.position.clone() });
+            return mesh;
+        }
+
+        createPoint(0, 0, -20, 0xd97706, 'P(0,0,-20)');
+        createPoint(50, 50, -15, 0xd97706, 'Q(50,50,-15)');
+        createPoint(0, 50, -15, 0xd97706, 'R(0,50,-15)');
+        const targetPointA = createPoint(50, 50, 0, 0xef4444, 'A(50,50,0)');
+
+        // Axis labels
+        labels.push({ el: createHtmlLabel('Trục X'), pos: m2t(28, 0, 0) });
+        labels.push({ el: createHtmlLabel('Trục Y'), pos: m2t(0, 28, 0) });
+        labels.push({ el: createHtmlLabel('Trục Z'), pos: m2t(0, 0, 15) });
+
+        function createHtmlLabel(text) {
+            const div = document.createElement('div');
+            div.className = 'label3d text-blue-800 bg-transparent shadow-none';
+            div.innerText = text;
+            document.body.appendChild(div);
+            return div;
+        }
+
+        // 5. The Boat
+        const boat = new THREE.Group();
+        
+        // Hull
+        const hull = new THREE.Mesh(
+            new THREE.BoxGeometry(3, 1.5, 7), // x (width), y (height), z (length) in local Three coords
+            new THREE.MeshStandardMaterial({color: 0xffffff})
+        );
+        hull.position.y = 0.75;
+        hull.castShadow = true;
+        boat.add(hull);
+
+        // Lower hull (red)
+        const lowerHull = new THREE.Mesh(
+            new THREE.BoxGeometry(2.9, 0.5, 6.9),
+            new THREE.MeshStandardMaterial({color: 0xe11d48})
+        );
+        lowerHull.position.y = 0.25;
+        boat.add(lowerHull);
+
+        // Cabin
+        const cabin = new THREE.Mesh(
+            new THREE.BoxGeometry(2, 1.2, 3),
+            new THREE.MeshStandardMaterial({color: 0x1e3a8a, transparent: true, opacity: 0.9})
+        );
+        cabin.position.set(0, 2.1, -0.5);
+        cabin.castShadow = true;
+        boat.add(cabin);
+
+        scene.add(boat);
+
+        // --- ANIMATION & SONAR LOGIC ---
+        let time = 0;
+        const sonarRings = [];
+        const ringGeo = new THREE.RingGeometry(0.5, 1.0, 32);
+        ringGeo.rotateX(-Math.PI / 2); // Lay flat horizontally
+
+        function animate() {
+            requestAnimationFrame(animate);
+            time += 0.01;
+
+            // 1. Calculate Boat Position (Oscillating from origin to A)
+            // progress goes from 0 to 1 and back
+            const progress = (Math.sin(time * 0.5) + 1) / 2; 
+            
+            const mathX = 50 * progress;
+            const mathY = 50 * progress;
+            const mathZ = 0;
+            const bPos = m2t(mathX, mathY, mathZ);
+            
+            boat.position.copy(bPos);
+
+            // Determine rotation
+            // Calculate derivative to find tangent direction
+            const dProgress = Math.cos(time * 0.5);
+            const dirX = dProgress >= 0 ? 50 : -50;
+            const dirY = dProgress >= 0 ? 50 : -50;
+            
+            // lookAt target slightly ahead
+            const targetPos = m2t(mathX + dirX * 0.01, mathY + dirY * 0.01, 0);
+            boat.lookAt(targetPos);
+
+            // 2. Emit Sonar
+            if (Math.random() < 0.15) {
+                const ringMat = new THREE.MeshBasicMaterial({
+                    color: 0x06b6d4, transparent: true, opacity: 0.8, side: THREE.DoubleSide
+                });
+                const ring = new THREE.Mesh(ringGeo, ringMat);
+                ring.position.copy(bPos);
+                // Store math coordinates for logic calculation
+                ring.userData = { mX: mathX, mY: mathY, age: 0 }; 
+                scene.add(ring);
+                sonarRings.push(ring);
+            }
+
+            // 3. Update Sonar Waves
+            for (let i = sonarRings.length - 1; i >= 0; i--) {
+                const r = sonarRings[i];
+                r.userData.age += 0.015;
+                
+                // Expand radius and move down (negative Math Z)
+                const currentMathZ = -20 * r.userData.age; 
+                const scale = 1 + 15 * r.userData.age;
+
+                r.position.copy(m2t(r.userData.mX, r.userData.mY, currentMathZ));
+                r.scale.set(scale, scale, 1);
+                r.material.opacity = 1 - r.userData.age * 1.5;
+
+                // Collision with seabed
+                const seabedZAtRing = r.userData.mY / 10 - 20;
+                if (currentMathZ < seabedZAtRing || r.material.opacity <= 0) {
+                    scene.remove(r);
+                    r.geometry.dispose();
+                    r.material.dispose();
+                    sonarRings.splice(i, 1);
+                }
+            }
+
+            // 4. Update UI Values
+            updateUI(mathX, mathY);
+
+            // 5. Update Labels positions
+            labels.forEach(label => {
+                const vector = label.pos.clone();
+                vector.project(camera);
+                
+                if (vector.z > 1) { // Behind camera
+                    label.el.classList.add('hidden-label');
+                } else {
+                    label.el.classList.remove('hidden-label');
+                    const x = (vector.x * 0.5 + 0.5) * window.innerWidth;
+                    const y = (vector.y * -0.5 + 0.5) * window.innerHeight;
+                    label.el.style.left = `${x}px`;
+                    label.el.style.top = `${y}px`;
+                }
+            });
+
+            renderer.render(scene, camera);
+        }
+
+        // Handle Window Resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // UI Update Logic
+        const uiPos = document.getElementById('boat-pos');
+        const uiVert = document.getElementById('vert-depth');
+        const uiDist = document.getElementById('short-dist');
+        const resultBox = document.getElementById('result-box');
+
+        function updateUI(x, y) {
+            uiPos.innerText = `(${x.toFixed(1)}, ${y.toFixed(1)}, 0.0)`;
+            
+            // Vertical depth = absolute Z of seabed at point (x,y)
+            const seabedZ = y / 10 - 20;
+            const vertDepth = Math.abs(seabedZ);
+            uiVert.innerText = `${vertDepth.toFixed(2)} m`;
+
+            // Shortest distance to plane: y - 10z - 200 = 0
+            // Formula: d = |Ay_0 + Bz_0 + D| / sqrt(A^2 + B^2) where normal is (0, 1, -10)
+            const dist = Math.abs(y - 10*(0) - 200) / Math.sqrt(0 + 1*1 + (-10)*(-10));
+            uiDist.innerText = `${dist.toFixed(2)} m`;
+
+            // Highlight target A achievement
+            if (x > 49.5 && y > 49.5) {
+                resultBox.classList.add('bg-green-100', 'border-green-400');
+                resultBox.classList.remove('bg-gray-50', 'border-gray-300');
+            } else {
+                resultBox.classList.remove('bg-green-100', 'border-green-400');
+                resultBox.classList.add('bg-gray-50', 'border-gray-300');
+            }
+        }
+
+        // Start animation
+        animate();
+    </script>
+</body>
+</html>
